@@ -1,0 +1,39 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfplan
+terraform/crash.log
+
+# App
+app/build/
+app/.gradle/
+app/.env
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# IDE
+.idea/
+*.iml
+*.ipr
+.vscode/
+
+# k6
+tests/k6/results.json
+
+# Reports
+report.html
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Helm
+helm/spring-boot-app/charts/
+*.tgz
