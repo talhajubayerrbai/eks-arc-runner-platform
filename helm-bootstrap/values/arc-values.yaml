@@ -1,0 +1,43 @@
+# ── Actions Runner Controller Helm values ─────────────────────────────────────────
+# chart: actions-runner-controller/actions-runner-controller
+# namespace: arc-system
+#
+# GitHub App credentials are stored in the Kubernetes secret
+# "controller-manager" (created by bootstrap.sh) — not here.
+
+replicaCount: 1
+
+# Tell ARC to use GitHub App auth from the pre-created secret
+authSecret:
+  create: false
+  name: controller-manager
+
+githubWebhookServer:
+  enabled: false   # enable if you want webhook-driven scaling
+
+syncPeriod: 10m
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Metrics for HPA / Prometheus
+metrics:
+  serviceAnnotations: {}
+  serviceMonitor:
+    enabled: false
+  port: 8443
+
+podAnnotations:
+  prometheus.io/scrape: "false"
+
+commonLabels:
+  Project: eks-arc-runner-platform
+  ManagedBy: helm
+
+# Scope ARC to a single namespace for runners
+scopeNamespace: "arc-runners"

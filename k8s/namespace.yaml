@@ -1,0 +1,20 @@
+# ── Kubernetes Namespaces ──────────────────────────────────────────────────────────────────
+# arc-system  — Actions Runner Controller components
+# arc-runners — RunnerDeployment and ephemeral runner pods
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-system
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    Project: eks-arc-runner-platform
+    ManagedBy: terraform
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arc-runners
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    Project: eks-arc-runner-platform
+    ManagedBy: terraform

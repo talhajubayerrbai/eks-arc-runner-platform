@@ -1,0 +1,61 @@
+# ── RBAC for ARC Runners ────────────────────────────────────────────────────────────────
+# ServiceAccount for runner pods to interact with the API server
+# if needed (e.g. kubectl commands inside workflow steps).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arc-runner
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/name: arc-runner
+    app.kubernetes.io/managed-by: kustomize
+    Project: eks-arc-runner-platform
+---
+# ClusterRole: allow runners to read pod/node info and manage deployments
+# in the default namespace for the deploy steps in build.yml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: arc-runner-role
+  labels:
+    app.kubernetes.io/name: arc-runner
+    Project: eks-arc-runner-platform
+rules:
+  # Core resource access (read)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "nodes", "services", "endpoints",
+                "configmaps", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Deployment management (for Helm upgrade + rollout status)
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Ingress (for ALB URL lookup in validate.yml)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  # HorizontalPodAutoscaler
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  # Helm needs Secrets + ServiceAccounts in the target namespace
+  - apiGroups: [""]
+    resources: ["secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: arc-runner-binding
+  labels:
+    app.kubernetes.io/name: arc-runner
+    Project: eks-arc-runner-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: arc-runner-role
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner
+    namespace: arc-runners

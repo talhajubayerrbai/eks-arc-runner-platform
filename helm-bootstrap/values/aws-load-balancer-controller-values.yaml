@@ -1,0 +1,41 @@
+# ── AWS Load Balancer Controller Helm values ──────────────────────────────────────
+# chart: eks/aws-load-balancer-controller
+# namespace: kube-system
+#
+# clusterName and serviceAccount.annotations are injected by bootstrap.sh
+# so they are NOT hardcoded here.
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller
+  # Annotation injected at deploy time:
+  # annotations:
+  #   eks.amazonaws.com/role-arn: <ALB_CONTROLLER_ROLE_ARN>
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+# Enable Shield and WAF integrations (set false if not subscribed)
+enableShield: false
+enableWaf: false
+enableWafv2: false
+
+logLevel: info
+
+defaultTags:
+  Project: eks-arc-runner-platform
+  ManagedBy: helm
+
+commonLabels:
+  Project: eks-arc-runner-platform
+  ManagedBy: helm

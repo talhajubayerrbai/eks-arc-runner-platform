@@ -4,12 +4,14 @@ kind: Kustomization
 namespace: arc-runners
 
 resources:
+  - namespace.yaml
+  - rbac.yaml
   - runner-deployment.yaml
   - horizontal-runner-autoscaler.yaml
 
 commonLabels:
   app.kubernetes.io/managed-by: kustomize
-  app.kubernetes.io/part-of: eks-arc-runner-platform
+  Project: eks-arc-runner-platform
 
 commonAnnotations:
-  managed-by: "eks-arc-runner-platform"
+  managed-by: udap

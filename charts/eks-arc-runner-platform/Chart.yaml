@@ -1,0 +1,19 @@
+apiVersion: v2
+name: eks-arc-runner-platform
+description: |
+  Spring Boot 3.2 REST API deployed on Amazon EKS via Actions Runner Controller.
+  Exposed through an AWS Application Load Balancer Ingress.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - spring-boot
+  - eks
+  - arc
+  - java
+maintainers:
+  - name: platform-team
+    email: platform@example.com
+annotations:
+  Project: eks-arc-runner-platform
+  ManagedBy: helm

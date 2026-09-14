@@ -1,0 +1,42 @@
+# ── Metrics Server Helm values ──────────────────────────────────────────────────────────
+# chart: metrics-server/metrics-server
+# namespace: kube-system
+
+replicas: 2
+
+args:
+  - --cert-dir=/tmp
+  - --secure-port=10250
+  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+  - --kubelet-use-node-status-port
+  - --metric-resolution=15s
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: metrics-server
+
+metrics:
+  enabled: true
+
+serviceMonitor:
+  enabled: false
+
+commonLabels:
+  Project: eks-arc-runner-platform
+  ManagedBy: helm
