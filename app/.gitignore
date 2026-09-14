@@ -1,0 +1,15 @@
+# Gradle
+.gradle/
+build/
+.env
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# IDE
+*.iml
+.idea/
+.vscode/
+
+# OS
+.DS_Store
