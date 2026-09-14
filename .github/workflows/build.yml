@@ -1,0 +1,190 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Build + Deploy Pipeline
+# Runs ENTIRELY on self-hosted Kubernetes runners (ARC).
+# Every job carries runs-on: self-hosted.
+#
+# Secrets required (set via UDAP set_pipeline_account or GitHub repo secrets):
+#   AWS_ACCESS_KEY_ID      — from set_pipeline_account
+#   AWS_SECRET_ACCESS_KEY  — from set_pipeline_account
+#   AWS_ROLE_TO_ASSUME     — IRSA role ARN for OIDC federation
+#
+# Variables required:
+#   AWS_REGION    — e.g. us-east-1
+#   ECR_REGISTRY  — e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com
+# ──────────────────────────────────────────────────────────────────────────────
+name: Build and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Git ref or SHA to deploy (defaults to branch head)"
+        required: false
+        default: ""
+      udap_run_id:
+        description: "UDAP run ID (injected by platform)"
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+      - "helm/**"
+      - ".github/workflows/build.yml"
+
+# OIDC permissions for AWS federation
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # Job 1: Checkout + Gradle Build
+  # ──────────────────────────────────────────────────────────────────────
+  build:
+    name: "Build"
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: app
+    outputs:
+      image_tag: ${{ env.IMAGE_TAG }}
+
+    steps:
+      - name: "1 — Checkout"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: "Set up Java 21"
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: "2 — Gradle Build (skip tests)"
+        run: ./gradlew build -x test --no-daemon
+
+      - name: "3 — Checkstyle"
+        run: ./gradlew checkstyleMain --no-daemon
+
+      - name: "4 — PMD"
+        run: ./gradlew pmdMain --no-daemon
+
+      - name: "5 — SpotBugs"
+        run: ./gradlew spotbugsMain --no-daemon
+
+      - name: "6 — JUnit Tests"
+        run: ./gradlew test --no-daemon
+
+      - name: "7 — JaCoCo Coverage Report + Verification"
+        run: ./gradlew jacocoTestReport jacocoTestCoverageVerification --no-daemon
+
+      - name: "Upload test reports"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ github.sha }}
+          path: |
+            app/build/reports/
+          retention-days: 14
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Job 2: Build Docker image + push to ECR
+  # ──────────────────────────────────────────────────────────────────────
+  publish:
+    name: "Build Image & Push to ECR"
+    runs-on: self-hosted
+    needs: build
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: "Configure AWS credentials (OIDC)"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "Login to Amazon ECR"
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: "8 — Build Docker Image"
+        run: |
+          docker build \
+            -t ${{ env.ECR_REGISTRY }}/spring-boot-app:${{ env.IMAGE_TAG }} \
+            -t ${{ env.ECR_REGISTRY }}/spring-boot-app:latest \
+            app/
+
+      - name: "9 — Push Image to ECR"
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/spring-boot-app:${{ env.IMAGE_TAG }}
+          docker push ${{ env.ECR_REGISTRY }}/spring-boot-app:latest
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Job 3: Helm deploy + rollout verification
+  # ──────────────────────────────────────────────────────────────────────
+  deploy:
+    name: "Helm Deploy"
+    runs-on: self-hosted
+    needs: publish
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: "Configure AWS credentials"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: "Update kubeconfig"
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name eks-arc-runner-platform
+
+      - name: "10 — Helm Upgrade"
+        run: |
+          helm upgrade --install spring-boot-app helm/spring-boot-app/ \
+            --set image.tag=${{ env.IMAGE_TAG }} \
+            --set image.repository=${{ env.ECR_REGISTRY }}/spring-boot-app \
+            --namespace default \
+            --wait \
+            --timeout 10m \
+            --atomic
+
+      - name: "11 — Verify Rollout"
+        run: |
+          kubectl rollout status deployment/spring-boot-app \
+            --namespace default \
+            --timeout=5m
+
+      - name: "Print deployment summary"
+        run: |
+          echo "=== Deployment Summary ==="
+          kubectl get deployment spring-boot-app -n default
+          kubectl get pods -l app.kubernetes.io/name=spring-boot-app -n default
+          ALB_URL=$(kubectl get ingress spring-boot-app -n default \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo 'pending')
+          echo "Live URL: http://${ALB_URL}"
