@@ -1,0 +1,86 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Destroy Pipeline
+# Tears down the full Terraform-managed infrastructure.
+# Runs ENTIRELY on self-hosted Kubernetes runners (ARC).
+#
+# Secrets required:
+#   AWS_ACCESS_KEY_ID      — from set_pipeline_account
+#   AWS_SECRET_ACCESS_KEY  — from set_pipeline_account
+#   TF_STATE_BUCKET        — S3 bucket for Terraform remote state
+#
+# Variables required:
+#   AWS_REGION    — e.g. us-east-1
+#   TF_STATE_KEY  — e.g. eks-arc-runner-platform/terraform.tfstate
+#   SERVICE_NAME  — e.g. eks-arc-runner-platform
+# ──────────────────────────────────────────────────────────────────────────────
+name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Git ref to checkout for destroy (defaults to main)"
+        required: false
+        default: ""
+      udap_run_id:
+        description: "UDAP run ID (injected by platform)"
+        required: false
+        default: ""
+      confirm_destroy:
+        description: "Type DESTROY to confirm full teardown"
+        required: true
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: "Terraform Destroy"
+    runs-on: self-hosted
+    # Safety gate — require explicit confirmation input
+    if: github.event.inputs.confirm_destroy == 'DESTROY'
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.ref }}
+
+      - name: "Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.7"
+
+      - name: "Terraform Init"
+        working-directory: terraform
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: "Terraform Destroy — Helm bootstrap first"
+        working-directory: terraform
+        run: |
+          # Destroy Helm releases before tearing down the cluster
+          terraform destroy -input=false -auto-approve \
+            -target=module.helm_bootstrap \
+            || true
+
+      - name: "Terraform Destroy — full stack"
+        working-directory: terraform
+        run: |
+          terraform destroy -input=false -auto-approve
+
+      - name: "Confirm destruction"
+        run: |
+          echo "=== Destroy complete ==="
+          echo "All infrastructure for eks-arc-runner-platform has been removed."
+          echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
