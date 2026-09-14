@@ -1,0 +1,31 @@
+# ─── HorizontalRunnerAutoscaler: Dynamic scaling 1-20 based on queued jobs ───────────────────────
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: eks-arc-runner-autoscaler
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/name: horizontal-runner-autoscaler
+    app.kubernetes.io/component: arc-runner
+    app.kubernetes.io/part-of: eks-arc-runner-platform
+spec:
+  # Target the RunnerDeployment defined in runner-deployment.yaml
+  scaleTargetRef:
+    kind: RunnerDeployment
+    name: eks-arc-runner-deployment
+
+  # Scaling bounds
+  minReplicas: 1
+  maxReplicas: 20
+
+  # Scale up when there are queued or in-progress workflow runs
+  metrics:
+    - type: TotalNumberOfQueuedAndInProgressWorkflowRuns
+      repositoryNames:
+        - eks-arc-runner-platform
+
+  # Scale down settings: wait 10 minutes of idleness before removing a runner
+  scaleDownDelaySecondsAfterScaleOut: 600
+
+  # GitHub Actions API poll interval
+  githubAPIRateLimitThreshold: 100
