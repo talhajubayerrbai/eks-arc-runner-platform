@@ -1,0 +1,69 @@
+# ─── RunnerDeployment: Ephemeral self-hosted runners for eks-arc-runner-platform ───────────────────
+#
+# Targets repository: talhajubayerrbai/eks-arc-runner-platform
+# Namespace: arc-runners
+# Runners are ephemeral (each job gets a fresh pod)
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: eks-arc-runner-deployment
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/name: runner-deployment
+    app.kubernetes.io/component: arc-runner
+    app.kubernetes.io/part-of: eks-arc-runner-platform
+spec:
+  # minReplicas is managed by HorizontalRunnerAutoscaler;
+  # this value is the initial cold-start count.
+  replicas: 1
+  template:
+    spec:
+      # Ephemeral runners: each runner pod handles exactly one job,
+      # then the pod is deleted and replaced by a fresh one.
+      ephemeral: true
+      image: summerwind/actions-runner:latest
+      imagePullPolicy: Always
+      repository: talhajubayerrbai/eks-arc-runner-platform
+      labels:
+        - self-hosted
+        - linux
+        - x64
+        - kubernetes
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "2000m"
+          memory: "2Gi"
+      env:
+        - name: DOCKER_HOST
+          value: tcp://localhost:2376
+        - name: DOCKER_TLS_VERIFY
+          value: "1"
+        - name: DOCKER_CERT_PATH
+          value: /certs/client
+      # DinD (Docker-in-Docker) sidecar for Docker builds
+      dockerEnabled: true
+      dockerdWithinRunnerContainer: false
+      volumeMounts:
+        - name: work
+          mountPath: /runner/_work
+      volumes:
+        - name: work
+          emptyDir: {}
+      # Node affinity: prefer nodes with the 'worker' label
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: role
+                    operator: In
+                    values:
+                      - worker
+      # Tolerations for tainted runner nodes (optional)
+      tolerations: []
+      serviceAccountName: default
+      automountServiceAccountToken: true
