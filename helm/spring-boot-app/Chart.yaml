@@ -1,0 +1,14 @@
+apiVersion: v2
+name: spring-boot-app
+description: Helm chart for the EKS ARC Runner Platform Spring Boot REST API
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+keywords:
+  - spring-boot
+  - java
+  - eks
+  - rest-api
+maintainers:
+  - name: eks-arc-runner-platform
+    email: platform@example.com
