@@ -1,0 +1,500 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# EKS ARC Runner Platform — End-to-End Infrastructure + Execution Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Required secrets (GitHub repository Settings → Secrets and variables → Actions):
+#   AWS_ACCESS_KEY_ID          — AWS IAM user or role access key
+#   AWS_SECRET_ACCESS_KEY      — AWS IAM user or role secret key
+#   GITHUB_TOKEN               — automatically provided by GitHub Actions
+#
+# Required variables (GitHub Actions Variables, not secrets):
+#   GITHUB_APP_ID              — GitHub App ID for ARC authentication
+#   GITHUB_APP_INSTALLATION_ID — GitHub App installation ID
+#   GITHUB_APP_PRIVATE_KEY     — base64-encoded GitHub App private key (PEM)
+#
+# Pipeline flow:
+#   validate-inputs
+#     → terraform-plan
+#       → terraform-apply          (requires "production" environment approval)
+#         → cluster-bootstrap      (Metrics Server, ALB Controller, ARC)
+#           → deploy-runners       (RunnerDeployment + HRA, waits for online runners)
+#             → trigger-build-pipeline    (skippable via skip_build)
+#               → trigger-validate-pipeline
+#                 → deployment-summary   (always runs)
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: infra-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: false
+        default: 'production'
+      aws_region:
+        description: 'AWS region'
+        required: false
+        default: 'us-east-1'
+      confirm_deploy:
+        description: 'Type "yes" to confirm deployment'
+        required: true
+        default: ''
+      skip_build:
+        description: 'Skip build and validate jobs after infra is up'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: infra-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 1 — Validate Inputs
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+  validate-inputs:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirm_deploy
+        run: |
+          if [ "${{ inputs.confirm_deploy }}" != "yes" ]; then
+            echo "❌ Deployment aborted: confirm_deploy must equal 'yes'."
+            echo "   Received: '${{ inputs.confirm_deploy }}'"
+            echo "   Re-run the workflow and type 'yes' in the confirm_deploy field."
+            exit 1
+          fi
+          echo "✅ confirm_deploy accepted"
+
+      - name: Echo deployment context
+        run: |
+          echo "🌍 Environment : ${{ inputs.environment }}"
+          echo "🗺️  AWS Region  : ${{ inputs.aws_region }}"
+          echo "📝 Commit SHA  : ${{ github.sha }}"
+          echo "🔖 Ref         : ${{ github.ref }}"
+          echo "⏭️  Skip build  : ${{ inputs.skip_build }}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 2 — Terraform Plan
+# ──────────────────────────────────────────────────────────────────────────────
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: validate-inputs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7.0'
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=devops-tfstate-33126054-us-east-1" \
+            -backend-config="key=eks-arc-runner-platform/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="dynamodb_table=terraform-state-lock"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -input=false \
+            -out=tfplan \
+            -var="aws_region=${{ inputs.aws_region }}" \
+            -var="github_app_id=${{ vars.GITHUB_APP_ID }}" \
+            -var="github_app_installation_id=${{ vars.GITHUB_APP_INSTALLATION_ID }}" \
+            -var="github_app_private_key=${{ vars.GITHUB_APP_PRIVATE_KEY }}"
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform/tfplan
+          retention-days: 1
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 3 — Terraform Apply
+# ──────────────────────────────────────────────────────────────────────────────
+  terraform-apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    environment: production
+    outputs:
+      cluster_name:        ${{ steps.tf_outputs.outputs.cluster_name }}
+      cluster_endpoint:    ${{ steps.tf_outputs.outputs.cluster_endpoint }}
+      ecr_repository_url:  ${{ steps.tf_outputs.outputs.ecr_repository_url }}
+      aws_region:          ${{ steps.tf_outputs.outputs.aws_region }}
+      vpc_id:              ${{ steps.tf_outputs.outputs.vpc_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7.0'
+          terraform_wrapper: false   # wrapper adds extra output lines that break -raw
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=devops-tfstate-33126054-us-east-1" \
+            -backend-config="key=eks-arc-runner-platform/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="dynamodb_table=terraform-state-lock"
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Capture Terraform Outputs
+        id: tf_outputs
+        working-directory: terraform
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)"         >> $GITHUB_OUTPUT
+          echo "cluster_endpoint=$(terraform output -raw cluster_endpoint)" >> $GITHUB_OUTPUT
+          echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> $GITHUB_OUTPUT
+          echo "aws_region=${{ inputs.aws_region }}"                        >> $GITHUB_OUTPUT
+          echo "vpc_id=$(terraform output -raw vpc_id)"                     >> $GITHUB_OUTPUT
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 4 — Cluster Bootstrap
+# ──────────────────────────────────────────────────────────────────────────────
+  cluster-bootstrap:
+    name: Cluster Bootstrap
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.terraform-apply.outputs.aws_region }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.13.0'
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ needs.terraform-apply.outputs.cluster_name }} \
+            --region ${{ needs.terraform-apply.outputs.aws_region }}
+
+      - name: Verify cluster connectivity
+        run: |
+          kubectl cluster-info
+          kubectl get nodes -o wide
+
+      - name: Run Helm bootstrap script
+        env:
+          CLUSTER_NAME: ${{ needs.terraform-apply.outputs.cluster_name }}
+          AWS_REGION:   ${{ needs.terraform-apply.outputs.aws_region }}
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          export AWS_ACCOUNT_ID
+          chmod +x helm-bootstrap/bootstrap.sh
+          CLUSTER_NAME="${CLUSTER_NAME}" \
+          AWS_REGION="${AWS_REGION}" \
+          AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}" \
+          ./helm-bootstrap/bootstrap.sh
+
+      - name: Wait for Metrics Server
+        run: |
+          kubectl rollout status deployment/metrics-server \
+            -n kube-system --timeout=300s
+
+      - name: Wait for AWS Load Balancer Controller
+        run: |
+          kubectl rollout status deployment/aws-load-balancer-controller \
+            -n kube-system --timeout=300s
+
+      - name: Wait for ARC Controller
+        run: |
+          kubectl rollout status deployment/arc-controller \
+            -n arc-systems --timeout=300s
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 5 — Deploy Runners
+# ──────────────────────────────────────────────────────────────────────────────
+  deploy-runners:
+    name: Deploy ARC Runners
+    runs-on: ubuntu-latest
+    needs: cluster-bootstrap
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.terraform-apply.outputs.aws_region }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ needs.terraform-apply.outputs.cluster_name }} \
+            --region ${{ needs.terraform-apply.outputs.aws_region }}
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/rbac.yaml
+          kubectl apply -f k8s/runner-deployment.yaml
+          kubectl apply -f k8s/horizontal-runner-autoscaler.yaml
+
+      - name: Wait for runner pods to become Ready
+        run: |
+          # RunnerDeployment is a CRD — not a native Deployment.
+          # Watch pod readiness directly instead of `rollout status`.
+          echo "⏳ Waiting for arc-runner pods to become Ready (timeout 600s)…"
+          kubectl wait \
+            --for=condition=Ready pods \
+            -l runner-deployment-name=arc-runner-deployment \
+            -n arc-runners \
+            --timeout=600s
+
+      - name: Poll GitHub API for online runners
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          echo "Polling GitHub API for online self-hosted runners in ${REPO}…"
+          for i in $(seq 1 30); do
+            ONLINE=$(curl -s \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runners" | \
+              jq '[.runners[] | select(.status=="online")] | length')
+            echo "  Attempt ${i}/30 — online runners: ${ONLINE}"
+            if [ "${ONLINE}" -ge 1 ]; then
+              echo "✅ At least 1 runner is online — proceeding."
+              break
+            fi
+            if [ "${i}" -eq 30 ]; then
+              echo "❌ No runners came online within 5 minutes."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Print runner summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "── Self-Hosted Runner Summary ──────────────────────────────"
+          curl -s \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners" | \
+            jq '.runners[] | {name, status, busy, labels: [.labels[].name]}'
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 6 — Trigger Build Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+  trigger-build-pipeline:
+    name: Trigger Build Pipeline
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, deploy-runners]
+    if: ${{ inputs.skip_build != 'true' }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.terraform-apply.outputs.aws_region }}
+
+      - name: Set pipeline environment variables
+        run: |
+          echo "ECR_REPO=${{ needs.terraform-apply.outputs.ecr_repository_url }}"   >> $GITHUB_ENV
+          echo "EKS_CLUSTER_NAME=${{ needs.terraform-apply.outputs.cluster_name }}" >> $GITHUB_ENV
+          echo "AWS_REGION=${{ needs.terraform-apply.outputs.aws_region }}"          >> $GITHUB_ENV
+
+      - name: Trigger build workflow and wait
+        run: |
+          echo "🚀 Dispatching build.yml on ref ${{ github.ref }}…"
+          gh workflow run build.yml \
+            --ref "${{ github.ref }}" \
+            --field revision="${{ github.sha }}"
+
+          # Give GitHub time to register the dispatched run
+          echo "⏳ Waiting 15 s for run to register…"
+          sleep 15
+
+          RUN_ID=$(gh run list \
+            --workflow=build.yml \
+            --limit=1 \
+            --json databaseId \
+            -q '.[0].databaseId')
+          echo "📋 Watching build run: ${RUN_ID}"
+          gh run watch "${RUN_ID}" --exit-status
+          echo "✅ Build pipeline completed successfully"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 7 — Trigger Validate Pipeline
+# ──────────────────────────────────────────────────────────────────────────────
+  trigger-validate-pipeline:
+    name: Trigger Validate Pipeline
+    runs-on: ubuntu-latest
+    needs: trigger-build-pipeline
+    if: ${{ inputs.skip_build != 'true' }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trigger validate workflow and wait
+        run: |
+          echo "🚀 Dispatching validate.yml on ref ${{ github.ref }}…"
+          gh workflow run validate.yml \
+            --ref "${{ github.ref }}"
+
+          echo "⏳ Waiting 15 s for run to register…"
+          sleep 15
+
+          RUN_ID=$(gh run list \
+            --workflow=validate.yml \
+            --limit=1 \
+            --json databaseId \
+            -q '.[0].databaseId')
+          echo "📋 Watching validate run: ${RUN_ID}"
+          gh run watch "${RUN_ID}" --exit-status
+          echo "✅ Validation pipeline completed successfully"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 8 — Deployment Summary
+# ──────────────────────────────────────────────────────────────────────────────
+  deployment-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs:
+      - terraform-apply
+      - cluster-bootstrap
+      - deploy-runners
+      - trigger-build-pipeline
+      - trigger-validate-pipeline
+    if: always()
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        if: ${{ needs.terraform-apply.result == 'success' }}
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.terraform-apply.outputs.aws_region || inputs.aws_region }}
+
+      - name: Install kubectl
+        if: ${{ needs.terraform-apply.result == 'success' }}
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Update kubeconfig
+        if: ${{ needs.terraform-apply.result == 'success' }}
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ needs.terraform-apply.outputs.cluster_name }} \
+            --region ${{ needs.terraform-apply.outputs.aws_region }} \
+          || echo "⚠️  Could not fetch kubeconfig — cluster may not be reachable."
+
+      - name: Write deployment summary
+        run: |
+          NODES=$(kubectl get nodes -o wide 2>/dev/null    || echo "cluster not reachable")
+          RUNNERS=$(kubectl get pods -n arc-runners 2>/dev/null || echo "arc-runners namespace not found")
+
+          cat >> "$GITHUB_STEP_SUMMARY" << 'SUMMARY'
+          ## 🚀 EKS ARC Runner Platform — Deployment Summary
+          SUMMARY
+
+          cat >> "$GITHUB_STEP_SUMMARY" << SUMMARY
+
+          | Item | Value |
+          |------|-------|
+          | **Cluster** | ${{ needs.terraform-apply.outputs.cluster_name }} |
+          | **Endpoint** | ${{ needs.terraform-apply.outputs.cluster_endpoint }} |
+          | **ECR** | ${{ needs.terraform-apply.outputs.ecr_repository_url }} |
+          | **Region** | ${{ needs.terraform-apply.outputs.aws_region }} |
+          | **VPC** | ${{ needs.terraform-apply.outputs.vpc_id }} |
+          | **Commit** | ${{ github.sha }} |
+          | **Run** | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          ### 🖥️ Nodes
+          \`\`\`
+          ${NODES}
+          \`\`\`
+
+          ### 🏃 Runner Pods
+          \`\`\`
+          ${RUNNERS}
+          \`\`\`
+
+          ### ✅ Job Results
+          | Job | Result |
+          |-----|--------|
+          | terraform-apply | ${{ needs.terraform-apply.result }} |
+          | cluster-bootstrap | ${{ needs.cluster-bootstrap.result }} |
+          | deploy-runners | ${{ needs.deploy-runners.result }} |
+          | trigger-build-pipeline | ${{ needs.trigger-build-pipeline.result }} |
+          | trigger-validate-pipeline | ${{ needs.trigger-validate-pipeline.result }} |
+          SUMMARY

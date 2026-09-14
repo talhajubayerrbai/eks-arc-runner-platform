@@ -1,3 +1,17 @@
+# ── Aliases used by the infra-deploy pipeline ────────────────────────────────
+# The infra-deploy workflow reads these exact names from `terraform output -raw`.
+output "cluster_name" {
+  description = "EKS cluster name (alias for infra-deploy pipeline)."
+  value       = module.eks.cluster_name
+}
+
+output "cluster_endpoint" {
+  description = "EKS API server endpoint (alias for infra-deploy pipeline)."
+  value       = module.eks.cluster_endpoint
+  sensitive   = true
+}
+
+# ── Full output set ───────────────────────────────────────────────────────────
 output "vpc_id" {
   description = "VPC ID."
   value       = module.vpc.vpc_id
