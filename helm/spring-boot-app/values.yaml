@@ -1,0 +1,104 @@
+# Default values for spring-boot-app Helm chart.
+# Override these with --set flags or a custom values file.
+
+# ─── Image ────────────────────────────────────────────────────────────────────────────
+image:
+  repository: PLACEHOLDER_ECR_REGISTRY/spring-boot-app
+  tag: latest
+  pullPolicy: Always
+
+# ─── Replicas ────────────────────────────────────────────────────────────────────────
+replicaCount: 2
+
+# ─── Service ──────────────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# ─── Ingress (AWS ALB) ────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+  hosts:
+    - host: ""
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ─── HPA ─────────────────────────────────────────────────────────────────────────────
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+# ─── Resources ──────────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# ─── Probes ───────────────────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: 8080
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /actuator/health/readiness
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+
+# ─── Environment Variables (via ConfigMap) ─────────────────────────────────────────────
+env:
+  SPRING_PROFILES_ACTIVE: production
+  SERVER_PORT: "8080"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics
+  MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: always
+
+# ─── Service Account ──────────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: spring-boot-app
+  annotations:
+    # Set to the Spring Boot app IRSA role ARN from Terraform output
+    eks.amazonaws.com/role-arn: PLACEHOLDER_SPRING_BOOT_ROLE_ARN
+
+# ─── Pod annotations ────────────────────────────────────────────────────────────────
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: /actuator/prometheus
+  prometheus.io/port: "8080"
+
+# ─── Security Context ───────────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
